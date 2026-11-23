@@ -2252,9 +2252,33 @@ pub async fn serve_on_port(port: u16) -> anyhow::Result<()> {
     }
 
     println!("music-server listening on http://{address}");
-    let service = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown(state.clone()))
-        .await;
+    // Graceful shutdown waits for every connection, and an open page holds its
+    // event streams for as long as it is open: Ctrl-C alone would wait on a
+    // browser tab for ever. So after Ctrl-C the open connections get a few
+    // seconds, a second Ctrl-C ends the wait at once, and the engines are
+    // stopped below either way.
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+    let graceful = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown({
+            let state = state.clone();
+            async move {
+                shutdown(state).await;
+                let _ = stopping.send(());
+            }
+        });
+    let service = tokio::select! {
+        served = std::future::IntoFuture::into_future(graceful) => served,
+        _ = async {
+            if stopped.await.is_err() {
+                return std::future::pending::<()>().await;
+            }
+            eprintln!("stopping: open pages get {SHUTDOWN_GRACE_SECONDS} seconds to close; Ctrl-C again stops now");
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECONDS)) => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        } => Ok(()),
+    };
     let acpp = state.acpp.clone();
     tokio::task::spawn_blocking(move || {
         acpp.stop_music();
@@ -6271,6 +6295,9 @@ async fn update_proxy(
 async fn test_proxy(Json(settings): Json<net::ProxySettings>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
     net::test(settings).await.map(Json).map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("{error:#}")))
 }
+
+/// How long open connections get to close after Ctrl-C before the service stops anyway.
+const SHUTDOWN_GRACE_SECONDS: u64 = 3;
 
 async fn shutdown(state: AppState) {
     let _ = tokio::signal::ctrl_c().await;
