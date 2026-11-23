@@ -1,0 +1,922 @@
+diff --git a/app/components/EngineSettings.tsx b/app/components/EngineSettings.tsx
+index df5f345..c2e9df6 100644
+--- a/app/components/EngineSettings.tsx
++++ b/app/components/EngineSettings.tsx
+@@ -4,6 +4,7 @@ import { AlertTriangle, Check, Cpu, FolderOpen, Loader2, RotateCw , Terminal } f
+ import { useI18n } from '../context/I18nContext';
+ import { poll } from '../services/poll';
+ import { DiagnosticsPanel } from './DiagnosticsPanel';
++import { pickServerPath, pickerInPage } from './ServerPathPicker';
+ 
+ /**
+  * Launch options for the local engine.
+@@ -151,6 +152,11 @@ export const EngineSettings: React.FC = () => {
+     setPicking(true);
+     setError(null);
+     try {
++      if (pickerInPage()) {
++        const path = await pickServerPath({ title: 'The engine executable to run instead of the bundled one', kind: 'file' });
++        if (path) setOptions(current => ({ ...current, engine_bin: path }));
++        return;
++      }
+       const response = await fetch('/engine/pick-executable', { method: 'POST' });
+       const body = await response.json().catch(() => null);
+       if (!response.ok) throw new Error(body?.error || `Opening the file picker failed (${response.status})`);
+diff --git a/app/components/LegacyLibraryPreview.test.tsx b/app/components/LegacyLibraryPreview.test.tsx
+index 1e8c01e..d5d2e2b 100644
+--- a/app/components/LegacyLibraryPreview.test.tsx
++++ b/app/components/LegacyLibraryPreview.test.tsx
+@@ -6,6 +6,8 @@ import { LegacyLibraryPreview } from './LegacyLibraryPreview';
+ vi.mock('../context/I18nContext', () => ({
+   useI18n: () => ({ t: (key: string) => key, songCount: (count: number) => String(count) }),
+ }));
++// the desktop window's flow: the studio shows the system dialog (a browser gets ServerPathPicker)
++vi.mock('../services/externalLinks', () => ({ isDesktop: () => true }));
+ 
+ it('keeps the current preview when a second folder selection is cancelled', async () => {
+   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+diff --git a/app/components/LegacyLibraryPreview.tsx b/app/components/LegacyLibraryPreview.tsx
+index b41200b..6e923ee 100644
+--- a/app/components/LegacyLibraryPreview.tsx
++++ b/app/components/LegacyLibraryPreview.tsx
+@@ -2,6 +2,7 @@ import React, { useState } from 'react';
+ import { FolderOpen, Loader2 } from 'lucide-react';
+ import { libraryChanged, playlistsChanged } from '../services/studioQueries';
+ import { useI18n } from '../context/I18nContext';
++import { pickServerPath, pickerInPage } from './ServerPathPicker';
+ 
+ interface LegacySong {
+   id: string;
+@@ -45,6 +46,12 @@ export function LegacyLibraryPreview({ sources = [] }: { sources?: LegacySource[
+   const [exclude, setExclude] = useState<Category[]>([]);
+   const [issues, setIssues] = useState<ImportIssue[]>([]);
+   async function chooseFolder(path?: string, registeredName?: string) {
++    // the desktop window shows the system dialog; a browser picks in the page and names the folder
++    if (!path && pickerInPage()) {
++      const picked = await pickServerPath({ title: 'A Studio folder to bring songs from', kind: 'folder' });
++      if (!picked) return;
++      path = picked;
++    }
+     setBusy(true);
+     setError('');
+     try {
+diff --git a/app/components/ModelStorageCard.tsx b/app/components/ModelStorageCard.tsx
+index b0f295c..03b2508 100644
+--- a/app/components/ModelStorageCard.tsx
++++ b/app/components/ModelStorageCard.tsx
+@@ -3,6 +3,7 @@ import { FolderCog, Loader2, RotateCcw, X } from 'lucide-react';
+ import { useI18n } from '../context/I18nContext';
+ import type { TranslationKey } from '../i18n/translations';
+ import { apiUrl } from '../services/apiBase';
++import { pickServerPath, pickerInPage } from './ServerPathPicker';
+ 
+ interface FolderUse { name: string; bytes: number; elsewhere: boolean }
+ interface Storage {
+@@ -81,7 +82,14 @@ export const ModelStorageCard: React.FC = () => {
+   const choose = () => guarded(async () => {
+     setAsking(true);
+     try {
+-      const body = await answer(await fetch(apiUrl('/v1/storage/pick'), { method: 'POST' }));
++      // the desktop window shows the system dialog; a browser picks in the page and names the folder
++      let request: RequestInit = { method: 'POST' };
++      if (pickerInPage()) {
++        const path = await pickServerPath({ title: t('storageChange'), kind: 'folder' });
++        if (!path) return;
++        request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) };
++      }
++      const body = await answer(await fetch(apiUrl('/v1/storage/pick'), request));
+       if (body.picked === true) setPicked(body as unknown as Picked);
+     } finally {
+       setAsking(false);
+diff --git a/app/components/ServerPathPicker.test.tsx b/app/components/ServerPathPicker.test.tsx
+new file mode 100644
+index 0000000..0f064cd
+--- /dev/null
++++ b/app/components/ServerPathPicker.test.tsx
+@@ -0,0 +1,95 @@
++// @vitest-environment happy-dom
++import { act } from 'react';
++import { afterEach, beforeEach, expect, it, vi } from 'vitest';
++import { pickServerPath } from './ServerPathPicker';
++
++const home = {
++  path: '/Users/me',
++  parent: '/Users',
++  separator: '/',
++  entries: [{ name: 'Models', dir: true }, { name: 'engine', dir: false }],
++  places: [{ name: 'Home', path: '/Users/me' }, { name: 'Big', path: '/Volumes/Big' }],
++};
++const models = { ...home, path: '/Users/me/Models', parent: '/Users/me', entries: [] };
++
++const asked: string[] = [];
++
++beforeEach(() => {
++  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
++  asked.length = 0;
++  localStorage.clear();
++  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
++    asked.push(init?.method === 'POST' ? `POST ${url} ${init.body}` : url);
++    if (url.startsWith('/v1/fs/folder')) return Response.json({ path: '/Users/me/New' });
++    const path = new URL(url, 'http://studio').searchParams.get('path');
++    if (path === '/gone') return Response.json({ error: 'open /gone: No such file or directory' }, { status: 400 });
++    if (path === '/Users/me/Models' || path === '/Users/me/New') return Response.json({ ...models, path });
++    return Response.json(home);
++  }));
++});
++
++afterEach(() => {
++  document.body.innerHTML = '';
++  vi.unstubAllGlobals();
++});
++
++const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
++const button = (text: string) => [...document.querySelectorAll('button')].find((each) => each.textContent?.trim() === text)!;
++
++it('opens a folder, goes into a subfolder and hands back its path', async () => {
++  let chosen: Promise<string | null> = Promise.resolve(null);
++  await act(async () => { chosen = pickServerPath({ title: 'Folder for the models' }); });
++  await settle();
++  expect(asked[0]).toBe('/v1/fs/list?');
++  expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('Folder for the models');
++  await act(async () => { button('Models').click(); });
++  await settle();
++  expect(asked.at(-1)).toBe('/v1/fs/list?path=%2FUsers%2Fme%2FModels');
++  await act(async () => { button('Choose this folder').click(); });
++  expect(await chosen).toBe('/Users/me/Models');
++  await settle();
++  expect(document.querySelector('[role="dialog"]')).toBeNull();
++  expect(localStorage.getItem('studio:server-picker:last')).toBe('/Users/me/Models');
++});
++
++it('asks for files too when picking a file, and needs one chosen', async () => {
++  let chosen: Promise<string | null> = Promise.resolve(null);
++  await act(async () => { chosen = pickServerPath({ title: 'Engine', kind: 'file' }); });
++  await settle();
++  expect(asked[0]).toBe('/v1/fs/list?files=true');
++  const choose = button('Choose file');
++  expect(choose.disabled).toBe(true);
++  await act(async () => { button('engine').click(); });
++  expect(choose.disabled).toBe(false);
++  await act(async () => { choose.click(); });
++  expect(await chosen).toBe('/Users/me/engine');
++});
++
++it('cancels with Escape', async () => {
++  let chosen: Promise<string | null> = Promise.resolve(null);
++  await act(async () => { chosen = pickServerPath({ title: 'Anything' }); });
++  await settle();
++  await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
++  expect(await chosen).toBeNull();
++});
++
++it('starts at home when the remembered folder is gone, and makes a new folder', async () => {
++  localStorage.setItem('studio:server-picker:last', '/gone');
++  let chosen: Promise<string | null> = Promise.resolve(null);
++  await act(async () => { chosen = pickServerPath({ title: 'Somewhere' }); });
++  await settle();
++  expect(asked.slice(0, 2)).toEqual(['/v1/fs/list?path=%2Fgone', '/v1/fs/list?']);
++  expect(document.querySelector('[role="alert"]')).toBeNull();
++  await act(async () => { button('New folder').click(); });
++  const name = document.querySelector<HTMLInputElement>('input[placeholder="Folder name"]')!;
++  await act(async () => {
++    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
++    set.call(name, 'New');
++    name.dispatchEvent(new Event('input', { bubbles: true }));
++  });
++  await act(async () => { button('Make').click(); });
++  await settle();
++  expect(asked).toContain('POST /v1/fs/folder {"path":"/Users/me","name":"New"}');
++  await act(async () => { button('Choose this folder').click(); });
++  expect(await chosen).toBe('/Users/me/New');
++});
+diff --git a/app/components/ServerPathPicker.tsx b/app/components/ServerPathPicker.tsx
+new file mode 100644
+index 0000000..222a263
+--- /dev/null
++++ b/app/components/ServerPathPicker.tsx
+@@ -0,0 +1,279 @@
++import React, { useCallback, useEffect, useState } from 'react';
++import { createRoot } from 'react-dom/client';
++import { ArrowUp, File as FileIcon, Folder, FolderPlus, HardDrive, Loader2, X } from 'lucide-react';
++import { apiUrl } from '../services/apiBase';
++import { isDesktop } from '../services/externalLinks';
++
++/**
++ * A folder or file on the studio's computer, picked in the page.
++ *
++ * The desktop window asks the studio for the system dialog. A browser cannot:
++ * the dialog would open on the studio's computer, not in front of the person,
++ * and the service run on its own has no window to show one in at all. So a
++ * browser gets this picker, which lists the studio computer's folders through
++ * `/v1/fs/list` and hands back the path the person chose.
++ */
++
++export interface PickOptions {
++  title: string;
++  /** `folder` chooses the folder being shown; `file` chooses a file in it. */
++  kind?: 'folder' | 'file';
++  /** Where to open; the last folder chosen, then the home folder, otherwise. */
++  start?: string;
++}
++
++interface Entry { name: string; dir: boolean }
++interface Place { name: string; path: string }
++interface Listing { path: string; parent: string | null; separator: string; entries: Entry[]; places: Place[] }
++
++const LAST = 'studio:server-picker:last';
++
++/** True where the page draws its own picker: anywhere but the desktop window. */
++export function pickerInPage(): boolean {
++  return !isDesktop();
++}
++
++/** Opens the picker; the chosen full path, or null when the person cancels. */
++export function pickServerPath(options: PickOptions): Promise<string | null> {
++  return new Promise((resolve) => {
++    const host = document.createElement('div');
++    document.body.appendChild(host);
++    const root = createRoot(host);
++    const done = (path: string | null) => {
++      // unmounting from inside the root's own event is deferred a tick
++      window.setTimeout(() => {
++        root.unmount();
++        host.remove();
++      }, 0);
++      resolve(path);
++    };
++    root.render(<ServerPathPicker {...options} onDone={done} />);
++  });
++}
++
++function remembered(): string | undefined {
++  try {
++    return localStorage.getItem(LAST) ?? undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++function remember(folder: string): void {
++  try {
++    localStorage.setItem(LAST, folder);
++  } catch {
++    // a browser that keeps nothing starts at home next time
++  }
++}
++
++function join(folder: string, name: string, separator: string): string {
++  return folder.endsWith(separator) ? `${folder}${name}` : `${folder}${separator}${name}`;
++}
++
++async function answer<T>(response: Response): Promise<T> {
++  const body = await response.json().catch(() => null);
++  if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
++  return body as T;
++}
++
++const BUTTON =
++  'inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:border-pink-400 hover:text-pink-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:text-zinc-200';
++const PRIMARY =
++  'inline-flex items-center gap-1.5 rounded-lg bg-linear-to-r from-orange-500 to-pink-600 px-3 py-1.5 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50';
++const INPUT =
++  'w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 font-mono text-xs text-zinc-900 outline-none focus:border-pink-400 dark:border-white/15 dark:bg-black/30 dark:text-zinc-100';
++
++export const ServerPathPicker: React.FC<PickOptions & { onDone: (path: string | null) => void }> = ({ title, kind = 'folder', start, onDone }) => {
++  const [listing, setListing] = useState<Listing | null>(null);
++  const [typed, setTyped] = useState('');
++  const [selected, setSelected] = useState<string | null>(null);
++  const [hidden, setHidden] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [naming, setNaming] = useState<string | null>(null);
++
++  const open = useCallback(async (path?: string, showHidden = hidden) => {
++    setLoading(true);
++    setError(null);
++    try {
++      const query = new URLSearchParams();
++      if (path) query.set('path', path);
++      if (kind === 'file') query.set('files', 'true');
++      if (showHidden) query.set('hidden', 'true');
++      const next = await answer<Listing>(await fetch(apiUrl(`/v1/fs/list?${query}`)));
++      setListing(next);
++      setTyped(next.path);
++      setSelected(null);
++      return true;
++    } catch (reason) {
++      setError(reason instanceof Error ? reason.message : String(reason));
++      return false;
++    } finally {
++      setLoading(false);
++    }
++  }, [hidden, kind]);
++
++  useEffect(() => {
++    // the place asked for, else the last one; a folder that is gone falls back to home
++    void (async () => {
++      const first = start || remembered();
++      if (!(await open(first)) && first) await open();
++    })();
++    // opened once, where it was asked to
++  }, []);
++
++  useEffect(() => {
++    const key = (event: KeyboardEvent) => {
++      if (event.key === 'Escape' && naming === null) onDone(null);
++    };
++    window.addEventListener('keydown', key);
++    return () => window.removeEventListener('keydown', key);
++  }, [naming, onDone]);
++
++  const choose = (path: string | null) => {
++    const chosen = path?.trim();
++    if (!chosen) return;
++    if (listing) remember(kind === 'file' ? listing.path : chosen);
++    onDone(chosen);
++  };
++
++  const makeFolder = async () => {
++    const name = naming?.trim();
++    if (!listing || !name) return;
++    try {
++      const made = await answer<{ path: string }>(await fetch(apiUrl('/v1/fs/folder'), {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ path: listing.path, name }),
++      }));
++      setNaming(null);
++      await open(made.path);
++    } catch (reason) {
++      setError(reason instanceof Error ? reason.message : String(reason));
++    }
++  };
++
++  // a folder picker chooses what the field says; a file picker needs a file
++  const answerPath = kind === 'file' ? selected : typed;
++
++  return (
++    <div
++      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-4"
++      role="dialog"
++      aria-modal="true"
++      aria-label={title}
++      onMouseDown={(event) => { if (event.target === event.currentTarget) onDone(null); }}
++    >
++      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl dark:border-white/10 dark:bg-suno-card">
++        <div className="flex items-start justify-between gap-3">
++          <div>
++            <h2 className="text-base font-bold text-zinc-900 dark:text-white">{title}</h2>
++            <p className="text-xs text-zinc-500">On the computer the studio runs on.</p>
++          </div>
++          <button type="button" onClick={() => onDone(null)} className="rounded p-1 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200" title="Close" aria-label="Close"><X size={16} /></button>
++        </div>
++
++        <div className="mt-3 flex items-center gap-2">
++          <button
++            type="button"
++            className={BUTTON}
++            disabled={!listing?.parent || loading}
++            onClick={() => listing?.parent && void open(listing.parent)}
++            title="Up one folder"
++            aria-label="Up one folder"
++          >
++            <ArrowUp size={13} />
++          </button>
++          <input
++            className={INPUT}
++            value={typed}
++            spellCheck={false}
++            onChange={(event) => setTyped(event.target.value)}
++            onKeyDown={(event) => { if (event.key === 'Enter') void open(typed.trim()); }}
++            aria-label="Path"
++          />
++          {loading && <Loader2 size={14} className="shrink-0 animate-spin text-zinc-400" />}
++        </div>
++
++        {listing && listing.places.length > 0 && (
++          <div className="mt-2 flex flex-wrap gap-1.5">
++            {listing.places.map((place) => (
++              <button
++                key={place.path}
++                type="button"
++                onClick={() => void open(place.path)}
++                className="inline-flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] text-zinc-600 hover:border-pink-400 hover:text-pink-600 dark:border-white/10 dark:text-zinc-300"
++                title={place.path}
++              >
++                <HardDrive size={11} />
++                {place.name}
++              </button>
++            ))}
++          </div>
++        )}
++
++        <div className="mt-3 min-h-[240px] flex-1 overflow-y-auto rounded-lg border border-zinc-200 dark:border-white/10">
++          {listing?.entries.length === 0 && !loading && (
++            <p className="p-3 text-xs text-zinc-500">{kind === 'file' ? 'Nothing in this folder.' : 'No folders in this folder.'}</p>
++          )}
++          {listing?.entries.map((entry) => {
++            const path = join(listing.path, entry.name, listing.separator);
++            const isSelected = !entry.dir && selected === path;
++            return (
++              <button
++                key={entry.name}
++                type="button"
++                onClick={() => (entry.dir ? void open(path) : setSelected(path))}
++                onDoubleClick={() => { if (!entry.dir) choose(path); }}
++                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-white/5 ${isSelected ? 'bg-pink-50 text-pink-700 dark:bg-pink-500/10 dark:text-pink-300' : 'text-zinc-800 dark:text-zinc-200'}`}
++              >
++                {entry.dir ? <Folder size={14} className="shrink-0 text-amber-500" /> : <FileIcon size={14} className="shrink-0 text-zinc-400" />}
++                <span className="truncate">{entry.name}</span>
++              </button>
++            );
++          })}
++        </div>
++
++        {error && <p className="mt-2 text-xs text-red-500" role="alert">{error}</p>}
++
++        <div className="mt-3 flex flex-wrap items-center gap-2">
++          <label className="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-300">
++            <input
++              type="checkbox"
++              checked={hidden}
++              onChange={(event) => { setHidden(event.target.checked); void open(listing?.path, event.target.checked); }}
++            />
++            Show hidden
++          </label>
++          {kind === 'folder' && (naming === null ? (
++            <button type="button" className={BUTTON} disabled={!listing} onClick={() => setNaming('')}>
++              <FolderPlus size={13} />New folder
++            </button>
++          ) : (
++            <span className="inline-flex items-center gap-1.5">
++              <input
++                autoFocus
++                className={`${INPUT} w-40`}
++                placeholder="Folder name"
++                value={naming}
++                onChange={(event) => setNaming(event.target.value)}
++                onKeyDown={(event) => {
++                  if (event.key === 'Enter') void makeFolder();
++                  if (event.key === 'Escape') { event.stopPropagation(); setNaming(null); }
++                }}
++              />
++              <button type="button" className={BUTTON} disabled={!naming?.trim()} onClick={() => void makeFolder()}>Make</button>
++              <button type="button" className={BUTTON} onClick={() => setNaming(null)}>Cancel</button>
++            </span>
++          ))}
++          <span className="flex-1" />
++          <button type="button" className={BUTTON} onClick={() => onDone(null)}>Cancel</button>
++          <button type="button" className={PRIMARY} disabled={!answerPath?.trim() || loading} onClick={() => choose(answerPath)}>
++            {kind === 'file' ? 'Choose file' : 'Choose this folder'}
++          </button>
++        </div>
++      </div>
++    </div>
++  );
++};
+diff --git a/app/components/SetupGate.tsx b/app/components/SetupGate.tsx
+index 8ebbaaa..afb27d1 100644
+--- a/app/components/SetupGate.tsx
++++ b/app/components/SetupGate.tsx
+@@ -18,6 +18,7 @@ import { ModelStorageCard } from './ModelStorageCard';
+ import { setTelemetry } from '../services/studioHub';
+ import { programName } from '../services/programs';
+ import type { TranslationKey } from '../i18n/translations';
++import { pickServerPath, pickerInPage } from './ServerPathPicker';
+ import {
+   componentKindLabel,
+   componentPrecision,
+@@ -1279,11 +1280,18 @@ export const SetupGate: React.FC<{
+                   type="button"
+                   disabled={adopting}
+                   aria-busy={adopting}
+-                  onClick={() => {
++                  onClick={() => void (async () => {
++                    // the desktop window shows the system dialog; a browser picks in the page and names the folder
++                    let request: RequestInit = { method: 'POST' };
++                    if (pickerInPage()) {
++                      const path = await pickServerPath({ title: t('useExistingModels'), kind: 'folder' });
++                      if (!path) return;
++                      request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) };
++                    }
+                     setAdopting(true);
+                     setAdoptNote(null);
+                     setAdoptRefused([]);
+-                    void fetch('/setup/adopt', { method: 'POST' })
++                    void fetch('/setup/adopt', request)
+                       .then(async (response) => (response.ok ? response.json() : Promise.reject(new Error(await errorMessage(response)))))
+                       .then(async (body: { picked?: boolean; adopted?: string[]; verified_optional?: number; copied?: { id: string; bytes: number }[]; refused?: AdoptRefusal[] } | null) => {
+                         if (!body?.picked) return;
+@@ -1302,7 +1310,7 @@ export const SetupGate: React.FC<{
+                       })
+                       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
+                       .finally(() => setAdopting(false));
+-                  }}
++                  })()}
+                   className="ml-2 mt-2 inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-600 hover:border-pink-400 hover:text-pink-600 dark:border-white/15 dark:text-zinc-300"
+                 >
+                   {adopting ? <Loader2 size={13} className="animate-spin" /> : <FolderDown size={13} />}
+diff --git a/app/services/adapters.ts b/app/services/adapters.ts
+index b1c8bef..b313714 100644
+--- a/app/services/adapters.ts
++++ b/app/services/adapters.ts
+@@ -9,6 +9,7 @@
+ import { useQuery } from '@tanstack/react-query';
+ import type { Language } from '../i18n/translations';
+ import { queryClient, SELF_READ } from './studioQueries';
++import { pickServerPath, pickerInPage } from '../components/ServerPathPicker';
+ 
+ export type AdapterText = string | Partial<Record<Language, string>>;
+ 
+@@ -201,7 +202,14 @@ export async function importAdapter(name: string, files: File[]): Promise<Instal
+ 
+ /** LoRAs from a folder the user picks in a system dialog, linked in without a copy. */
+ export async function importAdapterFolder(): Promise<{ picked: boolean; imported: Array<{ id: string; name: string; copied: boolean; already?: boolean }> }> {
+-  const response = await fetch('/v1/adapters/import-folder', { method: 'POST' });
++  // the desktop window shows the system dialog; a browser picks in the page and names the folder
++  let request: RequestInit = { method: 'POST' };
++  if (pickerInPage()) {
++    const path = await pickServerPath({ title: 'Folder with LoRA', kind: 'folder' });
++    if (!path) return { picked: false, imported: [] };
++    request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) };
++  }
++  const response = await fetch('/v1/adapters/import-folder', request);
+   const body = await response.json().catch(() => ({}));
+   if (!response.ok) throw new Error(body.error || `LoRA folder: HTTP ${response.status}`);
+   return body;
+diff --git a/crates/music-server/src/fs_browse.rs b/crates/music-server/src/fs_browse.rs
+new file mode 100644
+index 0000000..6667db0
+--- /dev/null
++++ b/crates/music-server/src/fs_browse.rs
+@@ -0,0 +1,198 @@
++//! The studio computer's folders, for a browser.
++//!
++//! A system dialog opens on the computer that runs the studio, which is the
++//! wrong screen for a browser on another one, and impossible for the service
++//! run on its own (there is no window to own a dialog). So the page draws its
++//! own folder and file picker and asks here what a folder holds. Every request
++//! has come through the access guard already, like the rest of the service.
++
++use std::path::{Path, PathBuf};
++
++use anyhow::{Context, Result};
++use axum::{extract::Query, http::StatusCode, Json};
++use serde::Deserialize;
++use serde_json::{json, Value};
++
++use crate::{api_error, ApiError};
++
++#[derive(Debug, Default, Deserialize)]
++pub struct Browse {
++    /// A full path; the home folder when left out.
++    #[serde(default)]
++    path: Option<String>,
++    /// Files as well as folders, for picking a file.
++    #[serde(default)]
++    files: bool,
++    /// Names that start with a dot.
++    #[serde(default)]
++    hidden: bool,
++}
++
++/// What a folder holds: its subfolders first, then (when asked) its files.
++pub async fn list(Query(browse): Query<Browse>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
++    tokio::task::spawn_blocking(move || listing(browse))
++        .await
++        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
++        .map(Json)
++        .map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("{error:#}")))
++}
++
++#[derive(Debug, Deserialize)]
++pub struct NewFolder {
++    /// The folder to make it in.
++    path: String,
++    name: String,
++}
++
++/// Makes a folder, for a picker asked where something should go.
++pub async fn make(Json(new): Json<NewFolder>) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
++    tokio::task::spawn_blocking(move || -> Result<Value> {
++        let name = new.name.trim();
++        anyhow::ensure!(!name.is_empty() && name != "." && name != "..", "a folder needs a name");
++        anyhow::ensure!(!name.contains(['/', '\\']) && !name.chars().any(char::is_control), "a folder name cannot hold / or \\");
++        let parent = PathBuf::from(new.path.trim());
++        anyhow::ensure!(parent.is_absolute(), "the folder must be a full path");
++        let made = parent.join(name);
++        std::fs::create_dir(&made).with_context(|| format!("make {}", made.display()))?;
++        Ok(json!({ "path": shown(&made) }))
++    })
++    .await
++    .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
++    .map(Json)
++    .map_err(|error| api_error(StatusCode::BAD_REQUEST, format!("{error:#}")))
++}
++
++fn listing(browse: Browse) -> Result<Value> {
++    let asked = match browse.path.as_deref().map(str::trim).filter(|path| !path.is_empty()) {
++        Some(path) => PathBuf::from(path),
++        None => home().unwrap_or_else(|| PathBuf::from(std::path::MAIN_SEPARATOR_STR)),
++    };
++    anyhow::ensure!(asked.is_absolute(), "the folder must be a full path");
++    let folder = plain(asked.canonicalize().with_context(|| format!("open {}", asked.display()))?);
++    anyhow::ensure!(folder.is_dir(), "{} is not a folder", folder.display());
++    let mut entries: Vec<(bool, String)> = Vec::new();
++    for entry in std::fs::read_dir(&folder).with_context(|| format!("read {}", folder.display()))?.flatten() {
++        let name = entry.file_name().to_string_lossy().into_owned();
++        if !browse.hidden && name.starts_with('.') {
++            continue;
++        }
++        // a link to a folder is a folder; a broken one is left out
++        let Ok(meta) = std::fs::metadata(entry.path()) else { continue };
++        if meta.is_dir() || (browse.files && meta.is_file()) {
++            entries.push((meta.is_dir(), name));
++        }
++    }
++    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
++    Ok(json!({
++        "path": shown(&folder),
++        "parent": folder.parent().map(shown),
++        "separator": std::path::MAIN_SEPARATOR_STR,
++        "entries": entries.into_iter().map(|(dir, name)| json!({ "name": name, "dir": dir })).collect::<Vec<_>>(),
++        "places": places(),
++    }))
++}
++
++fn home() -> Option<PathBuf> {
++    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).filter(|home| home.is_dir())
++}
++
++/// Where a picker starts from: home, the studio's data, the disks.
++fn places() -> Vec<Value> {
++    let mut places = Vec::new();
++    let mut add = |name: String, path: &Path| {
++        if path.is_dir() {
++            places.push(json!({ "name": name, "path": shown(path) }));
++        }
++    };
++    if let Some(home) = home() {
++        add("Home".into(), &home);
++    }
++    if let Some(data) = crate::studio_data_root() {
++        add("Studio data".into(), &data);
++    }
++    #[cfg(windows)]
++    for letter in b'A'..=b'Z' {
++        let drive = format!("{}:\\", letter as char);
++        add(drive.clone(), Path::new(&drive));
++    }
++    #[cfg(not(windows))]
++    {
++        add("/".into(), Path::new("/"));
++        // disks mounted where macOS and Linux put them
++        let user = std::env::var("USER").unwrap_or_default();
++        let mounts = ["/Volumes".to_string(), "/mnt".to_string(), "/media".to_string(), format!("/media/{user}"), format!("/run/media/{user}")];
++        for mounts in mounts {
++            let Ok(found) = std::fs::read_dir(&mounts) else { continue };
++            let mut found: Vec<PathBuf> = found.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
++            found.sort();
++            for disk in found {
++                if disk.to_string_lossy() == format!("/media/{user}") {
++                    continue;
++                }
++                add(disk.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), &disk);
++            }
++        }
++    }
++    places
++}
++
++fn shown(path: &Path) -> String {
++    path.display().to_string()
++}
++
++/// A canonical Windows path without its `\\?\` prefix, which the rest of the
++/// studio and the person would not recognise.
++fn plain(path: PathBuf) -> PathBuf {
++    #[cfg(windows)]
++    {
++        let text = path.to_string_lossy();
++        if let Some(rest) = text.strip_prefix(r"\\?\") {
++            if !rest.starts_with("UNC\\") {
++                return PathBuf::from(rest);
++            }
++        }
++    }
++    path
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn lists_folders_first_and_files_only_when_asked() {
++        let dir = tempfile::tempdir().unwrap();
++        std::fs::create_dir(dir.path().join("beta")).unwrap();
++        std::fs::create_dir(dir.path().join("Alpha")).unwrap();
++        std::fs::create_dir(dir.path().join(".hidden")).unwrap();
++        std::fs::write(dir.path().join("a.bin"), b"x").unwrap();
++        let path = Some(dir.path().display().to_string());
++        let folders = listing(Browse { path: path.clone(), files: false, hidden: false }).unwrap();
++        let names: Vec<&str> = folders["entries"].as_array().unwrap().iter().map(|entry| entry["name"].as_str().unwrap()).collect();
++        assert_eq!(names, ["Alpha", "beta"]);
++        let all = listing(Browse { path, files: true, hidden: true }).unwrap();
++        let names: Vec<&str> = all["entries"].as_array().unwrap().iter().map(|entry| entry["name"].as_str().unwrap()).collect();
++        assert_eq!(names, [".hidden", "Alpha", "beta", "a.bin"]);
++        assert_eq!(all["entries"][3]["dir"], false);
++    }
++
++    #[test]
++    fn refuses_a_relative_path_and_a_file() {
++        assert!(listing(Browse { path: Some("relative/dir".into()), ..Browse::default() }).is_err());
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("f");
++        std::fs::write(&file, b"x").unwrap();
++        assert!(listing(Browse { path: Some(file.display().to_string()), ..Browse::default() }).is_err());
++    }
++
++    #[tokio::test]
++    async fn makes_a_folder_and_refuses_a_path_for_a_name() {
++        let dir = tempfile::tempdir().unwrap();
++        let parent = dir.path().display().to_string();
++        let made = make(Json(NewFolder { path: parent.clone(), name: "new one".into() })).await.unwrap();
++        assert!(dir.path().join("new one").is_dir());
++        assert!(made.0["path"].as_str().unwrap().ends_with("new one"));
++        assert!(make(Json(NewFolder { path: parent.clone(), name: "../escape".into() })).await.is_err());
++        assert!(make(Json(NewFolder { path: parent, name: "..".into() })).await.is_err());
++    }
++}
+diff --git a/crates/music-server/src/legacy_library.rs b/crates/music-server/src/legacy_library.rs
+index 0820d78..f403a6d 100644
+--- a/crates/music-server/src/legacy_library.rs
++++ b/crates/music-server/src/legacy_library.rs
+@@ -58,6 +58,9 @@ pub(super) async fn preview(
+     tokio::task::spawn_blocking(move || {
+         let folder = match source {
+             Source::Folder { path } => path,
++            Source::Picker { pick: true } if !crate::saving::has_window() => {
++                anyhow::bail!("this studio has no window to show a dialog in; name the folder as \"path\"")
++            }
+             Source::Picker { pick: true } => match rfd::FileDialog::new().pick_folder() {
+                 Some(folder) => folder,
+                 None => return Ok(json!({"cancelled": true})),
+diff --git a/crates/music-server/src/lib.rs b/crates/music-server/src/lib.rs
+index 38abdc0..ca7dbce 100644
+--- a/crates/music-server/src/lib.rs
++++ b/crates/music-server/src/lib.rs
+@@ -109,6 +109,7 @@ mod score;
+ mod sizes;
+ pub mod net;
+ mod saving;
++mod fs_browse;
+ mod export;
+ mod song_midi;
+ mod ableton;
+@@ -2027,6 +2028,8 @@ pub async fn serve_on_port(port: u16) -> anyhow::Result<()> {
+         .route("/v1/library/file-tags", get(read_file_tags).put(write_file_tags))
+         .route("/v1/storage", get(model_storage::status).put(model_storage::change))
+         .route("/v1/storage/pick", post(model_storage::pick))
++        .route("/v1/fs/list", get(fs_browse::list))
++        .route("/v1/fs/folder", post(fs_browse::make))
+         .route("/v1/storage/cancel", post(model_storage::cancel))
+         .route("/v1/exports", post(export::start))
+         .route("/v1/exports/{id}", get(export::status).delete(export::forget))
+@@ -3185,6 +3188,7 @@ async fn import_adapter_folder(State(state): State<AppState>, body: axum::body::
+     let named = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
+     let picked = match named {
+         Some(folder) => Some(folder),
++        None if !saving::has_window() => return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; name the folder as \"path\"".into())),
+         None => tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Folder with LoRA").pick_folder())
+             .await
+             .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+@@ -6603,6 +6607,9 @@ async fn restart_local_engine(State(state): State<AppState>) -> Result<Json<Valu
+ /// hands the path back; nothing changes until the user saves the options, the
+ /// same as every other field on that page.
+ async fn pick_engine_executable() -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
++    if !saving::has_window() {
++        return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; type the executable's path".into()));
++    }
+     let picked = tokio::task::spawn_blocking(|| {
+         let mut dialog = rfd::FileDialog::new().set_title("The engine executable to run instead of the bundled one".to_string());
+         // An extension filter would hide a Linux build, which has none.
+@@ -10603,6 +10610,7 @@ async fn setup_adopt(State(state): State<AppState>, body: axum::body::Bytes) ->
+     let named = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
+     let picked = match named {
+         Some(folder) => Some(folder),
++        None if !saving::has_window() => return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; name the folder as \"path\"".into())),
+         None => tokio::task::spawn_blocking(move || {
+             rfd::FileDialog::new().set_title("Folder with YuE2 models").pick_folder()
+         })
+diff --git a/crates/music-server/src/main.rs b/crates/music-server/src/main.rs
+index 72d50d7..7eb1ae7 100644
+--- a/crates/music-server/src/main.rs
++++ b/crates/music-server/src/main.rs
+@@ -3,14 +3,64 @@
+ //! The desktop application embeds `music_server::serve_on_port` directly; this binary
+ //! exists for development and for headless use.
+ 
++use std::path::{Component, Path, PathBuf};
++
+ fn main() -> anyhow::Result<()> {
+     if !music_engine::process_group::bind_children_to_this_process() {
+         eprintln!("this process could not create its own job object; the engine is stopped by the supervisor only");
+     }
+     music_server::apply_saved_gpu();
++    serve_built_interface();
+     // the port is decided before the async workers start: deciding it can wait on netsh
+     music_engine::yue_server::engine_port();
+     let served = tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(music_server::serve());
+     music_engine::process_group::terminate_group_members();
+     served
+ }
++
++/// Hands browsers the built interface (`npm --prefix app run build`), as the
++/// desktop shell does with its bundled copy. `YUE_STUDIO_UI_DIR` points at
++/// another build; the default is `app/dist` of this checkout.
++fn serve_built_interface() {
++    let dir = std::env::var_os("YUE_STUDIO_UI_DIR")
++        .map(PathBuf::from)
++        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/dist"));
++    if !dir.join("index.html").is_file() {
++        eprintln!("no built interface at {}; run `npm --prefix app run build` to serve it", dir.display());
++        return;
++    }
++    println!("serving the interface from {}", dir.display());
++    music_server::set_asset_source(Box::new(move |path: &str| {
++        let relative = Path::new(path);
++        // plain names only: no `..`, no root, no drive
++        if !relative.components().all(|part| matches!(part, Component::Normal(_))) {
++            return None;
++        }
++        let bytes = std::fs::read(dir.join(relative)).ok()?;
++        Some((bytes, media_type(path).to_string()))
++    }));
++}
++
++fn media_type(path: &str) -> &'static str {
++    match path.rsplit('.').next().unwrap_or_default().to_ascii_lowercase().as_str() {
++        "html" => "text/html; charset=utf-8",
++        "js" | "mjs" => "text/javascript; charset=utf-8",
++        "css" => "text/css; charset=utf-8",
++        "json" | "map" => "application/json",
++        "wasm" => "application/wasm",
++        "svg" => "image/svg+xml",
++        "png" => "image/png",
++        "jpg" | "jpeg" => "image/jpeg",
++        "gif" => "image/gif",
++        "webp" => "image/webp",
++        "ico" => "image/x-icon",
++        "woff" => "font/woff",
++        "woff2" => "font/woff2",
++        "ttf" => "font/ttf",
++        "mp3" => "audio/mpeg",
++        "wav" => "audio/wav",
++        "mp4" => "video/mp4",
++        "txt" => "text/plain; charset=utf-8",
++        _ => "application/octet-stream",
++    }
++}
+diff --git a/crates/music-server/src/mcp.rs b/crates/music-server/src/mcp.rs
+index a813bc6..32c987c 100644
+--- a/crates/music-server/src/mcp.rs
++++ b/crates/music-server/src/mcp.rs
+@@ -4462,6 +4462,8 @@ mod tests {
+         ("GET", "/v1/rvc/catalog/sample/{id}", "binary verified demo audio addressed by sample_audio_url in rvc_catalog_list"),
+         ("GET", "/health", "the service's identity for the desktop shell: initialize names the server and its version"),
+         ("POST", "/engine/pick-executable", "a file dialog for the person: engine_options_set takes the executable's path"),
++        ("GET", "/v1/fs/list", "the page's own folder picker for a browser: every tool takes a path the agent names"),
++        ("POST", "/v1/fs/folder", "a new folder from the page's own picker: every tool takes a path the agent names"),
+         ("POST", "/setup/kv-cache-notice/seen", "the window's note that it told the person: engine_options_get says the cache and why"),
+         ("POST", "/v1/diagnostics/report/reveal", "shows a report in the person's file manager: diagnostics_report answers its path"),
+         ("POST", "/v1/diagnostics/logs/reveal", "shows the log folder in the person's file manager: diagnostics_get carries the latest lines"),
+diff --git a/crates/music-server/src/model_storage.rs b/crates/music-server/src/model_storage.rs
+index 2c51db8..2b0e1e4 100644
+--- a/crates/music-server/src/model_storage.rs
++++ b/crates/music-server/src/model_storage.rs
+@@ -504,6 +504,7 @@ pub async fn pick(body: axum::body::Bytes) -> Result<Json<Value>, (StatusCode, J
+     let named = serde_json::from_slice::<Named>(&body).unwrap_or_default().path.map(PathBuf::from);
+     let picked = match named {
+         Some(folder) => Some(folder),
++        None if !crate::saving::has_window() => return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; name the folder as \"path\"".into())),
+         None => tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Folder for the studio's models").pick_folder())
+             .await
+             .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+diff --git a/crates/music-server/src/saving.rs b/crates/music-server/src/saving.rs
+index 065cf6a..963d2dd 100644
+--- a/crates/music-server/src/saving.rs
++++ b/crates/music-server/src/saving.rs
+@@ -33,6 +33,12 @@ pub fn set_save_dialog(dialog: SaveDialog) {
+     let _ = DIALOG.set(dialog);
+ }
+ 
++/// Whether a desktop window is there to own a system dialog. The service run
++/// on its own has none, and a dialog asked for there would panic.
++pub(crate) fn has_window() -> bool {
++    DIALOG.get().is_some()
++}
++
+ #[derive(Default)]
+ struct Saving {
+     /// Places chosen and not yet written, by the id handed to the window.

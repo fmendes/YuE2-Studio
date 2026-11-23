@@ -4462,6 +4462,8 @@ mod tests {
         ("GET", "/v1/rvc/catalog/sample/{id}", "binary verified demo audio addressed by sample_audio_url in rvc_catalog_list"),
         ("GET", "/health", "the service's identity for the desktop shell: initialize names the server and its version"),
         ("POST", "/engine/pick-executable", "a file dialog for the person: engine_options_set takes the executable's path"),
+        ("GET", "/v1/fs/list", "the page's own folder picker for a browser: every tool takes a path the agent names"),
+        ("POST", "/v1/fs/folder", "a new folder from the page's own picker: every tool takes a path the agent names"),
         ("POST", "/setup/kv-cache-notice/seen", "the window's note that it told the person: engine_options_get says the cache and why"),
         ("POST", "/v1/diagnostics/report/reveal", "shows a report in the person's file manager: diagnostics_report answers its path"),
         ("POST", "/v1/diagnostics/logs/reveal", "shows the log folder in the person's file manager: diagnostics_get carries the latest lines"),

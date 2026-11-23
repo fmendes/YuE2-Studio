@@ -18,6 +18,7 @@ import { ModelStorageCard } from './ModelStorageCard';
 import { setTelemetry } from '../services/studioHub';
 import { programName } from '../services/programs';
 import type { TranslationKey } from '../i18n/translations';
+import { pickServerPath, pickerInPage } from './ServerPathPicker';
 import {
   componentKindLabel,
   componentPrecision,
@@ -1279,11 +1280,18 @@ export const SetupGate: React.FC<{
                   type="button"
                   disabled={adopting}
                   aria-busy={adopting}
-                  onClick={() => {
+                  onClick={() => void (async () => {
+                    // the desktop window shows the system dialog; a browser picks in the page and names the folder
+                    let request: RequestInit = { method: 'POST' };
+                    if (pickerInPage()) {
+                      const path = await pickServerPath({ title: t('useExistingModels'), kind: 'folder' });
+                      if (!path) return;
+                      request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) };
+                    }
                     setAdopting(true);
                     setAdoptNote(null);
                     setAdoptRefused([]);
-                    void fetch('/setup/adopt', { method: 'POST' })
+                    void fetch('/setup/adopt', request)
                       .then(async (response) => (response.ok ? response.json() : Promise.reject(new Error(await errorMessage(response)))))
                       .then(async (body: { picked?: boolean; adopted?: string[]; verified_optional?: number; copied?: { id: string; bytes: number }[]; refused?: AdoptRefusal[] } | null) => {
                         if (!body?.picked) return;
@@ -1302,7 +1310,7 @@ export const SetupGate: React.FC<{
                       })
                       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
                       .finally(() => setAdopting(false));
-                  }}
+                  })()}
                   className="ml-2 mt-2 inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-600 hover:border-pink-400 hover:text-pink-600 dark:border-white/15 dark:text-zinc-300"
                 >
                   {adopting ? <Loader2 size={13} className="animate-spin" /> : <FolderDown size={13} />}

@@ -33,6 +33,12 @@ pub fn set_save_dialog(dialog: SaveDialog) {
     let _ = DIALOG.set(dialog);
 }
 
+/// Whether a desktop window is there to own a system dialog. The service run
+/// on its own has none, and a dialog asked for there would panic.
+pub(crate) fn has_window() -> bool {
+    DIALOG.get().is_some()
+}
+
 #[derive(Default)]
 struct Saving {
     /// Places chosen and not yet written, by the id handed to the window.

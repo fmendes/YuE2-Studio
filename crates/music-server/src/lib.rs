@@ -109,6 +109,7 @@ mod score;
 mod sizes;
 pub mod net;
 mod saving;
+mod fs_browse;
 mod export;
 mod song_midi;
 mod ableton;
@@ -2027,6 +2028,8 @@ pub async fn serve_on_port(port: u16) -> anyhow::Result<()> {
         .route("/v1/library/file-tags", get(read_file_tags).put(write_file_tags))
         .route("/v1/storage", get(model_storage::status).put(model_storage::change))
         .route("/v1/storage/pick", post(model_storage::pick))
+        .route("/v1/fs/list", get(fs_browse::list))
+        .route("/v1/fs/folder", post(fs_browse::make))
         .route("/v1/storage/cancel", post(model_storage::cancel))
         .route("/v1/exports", post(export::start))
         .route("/v1/exports/{id}", get(export::status).delete(export::forget))
@@ -3185,6 +3188,7 @@ async fn import_adapter_folder(State(state): State<AppState>, body: axum::body::
     let named = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
     let picked = match named {
         Some(folder) => Some(folder),
+        None if !saving::has_window() => return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; name the folder as \"path\"".into())),
         None => tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Folder with LoRA").pick_folder())
             .await
             .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
@@ -6603,6 +6607,9 @@ async fn restart_local_engine(State(state): State<AppState>) -> Result<Json<Valu
 /// hands the path back; nothing changes until the user saves the options, the
 /// same as every other field on that page.
 async fn pick_engine_executable() -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if !saving::has_window() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; type the executable's path".into()));
+    }
     let picked = tokio::task::spawn_blocking(|| {
         let mut dialog = rfd::FileDialog::new().set_title("The engine executable to run instead of the bundled one".to_string());
         // An extension filter would hide a Linux build, which has none.
@@ -10603,6 +10610,7 @@ async fn setup_adopt(State(state): State<AppState>, body: axum::body::Bytes) -> 
     let named = serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("path").and_then(Value::as_str).map(std::path::PathBuf::from));
     let picked = match named {
         Some(folder) => Some(folder),
+        None if !saving::has_window() => return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; name the folder as \"path\"".into())),
         None => tokio::task::spawn_blocking(move || {
             rfd::FileDialog::new().set_title("Folder with YuE2 models").pick_folder()
         })
