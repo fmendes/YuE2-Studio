@@ -58,6 +58,9 @@ pub(super) async fn preview(
     tokio::task::spawn_blocking(move || {
         let folder = match source {
             Source::Folder { path } => path,
+            Source::Picker { pick: true } if !crate::saving::has_window() => {
+                anyhow::bail!("this studio has no window to show a dialog in; name the folder as \"path\"")
+            }
             Source::Picker { pick: true } => match rfd::FileDialog::new().pick_folder() {
                 Some(folder) => folder,
                 None => return Ok(json!({"cancelled": true})),

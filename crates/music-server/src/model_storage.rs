@@ -504,6 +504,7 @@ pub async fn pick(body: axum::body::Bytes) -> Result<Json<Value>, (StatusCode, J
     let named = serde_json::from_slice::<Named>(&body).unwrap_or_default().path.map(PathBuf::from);
     let picked = match named {
         Some(folder) => Some(folder),
+        None if !crate::saving::has_window() => return Err(api_error(StatusCode::BAD_REQUEST, "this studio has no window to show a dialog in; name the folder as \"path\"".into())),
         None => tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Folder for the studio's models").pick_folder())
             .await
             .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,

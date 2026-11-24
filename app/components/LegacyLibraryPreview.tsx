@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FolderOpen, Loader2 } from 'lucide-react';
 import { libraryChanged, playlistsChanged } from '../services/studioQueries';
 import { useI18n } from '../context/I18nContext';
+import { pickServerPath, pickerInPage } from './ServerPathPicker';
 
 interface LegacySong {
   id: string;
@@ -45,6 +46,12 @@ export function LegacyLibraryPreview({ sources = [] }: { sources?: LegacySource[
   const [exclude, setExclude] = useState<Category[]>([]);
   const [issues, setIssues] = useState<ImportIssue[]>([]);
   async function chooseFolder(path?: string, registeredName?: string) {
+    // the desktop window shows the system dialog; a browser picks in the page and names the folder
+    if (!path && pickerInPage()) {
+      const picked = await pickServerPath({ title: 'A Studio folder to bring songs from', kind: 'folder' });
+      if (!picked) return;
+      path = picked;
+    }
     setBusy(true);
     setError('');
     try {

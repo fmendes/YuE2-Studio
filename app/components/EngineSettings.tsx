@@ -4,6 +4,7 @@ import { AlertTriangle, Check, Cpu, FolderOpen, Loader2, RotateCw , Terminal } f
 import { useI18n } from '../context/I18nContext';
 import { poll } from '../services/poll';
 import { DiagnosticsPanel } from './DiagnosticsPanel';
+import { pickServerPath, pickerInPage } from './ServerPathPicker';
 
 /**
  * Launch options for the local engine.
@@ -151,6 +152,11 @@ export const EngineSettings: React.FC = () => {
     setPicking(true);
     setError(null);
     try {
+      if (pickerInPage()) {
+        const path = await pickServerPath({ title: 'The engine executable to run instead of the bundled one', kind: 'file' });
+        if (path) setOptions(current => ({ ...current, engine_bin: path }));
+        return;
+      }
       const response = await fetch('/engine/pick-executable', { method: 'POST' });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(body?.error || `Opening the file picker failed (${response.status})`);

@@ -9,6 +9,7 @@
 import { useQuery } from '@tanstack/react-query';
 import type { Language } from '../i18n/translations';
 import { queryClient, SELF_READ } from './studioQueries';
+import { pickServerPath, pickerInPage } from '../components/ServerPathPicker';
 
 export type AdapterText = string | Partial<Record<Language, string>>;
 
@@ -201,7 +202,14 @@ export async function importAdapter(name: string, files: File[]): Promise<Instal
 
 /** LoRAs from a folder the user picks in a system dialog, linked in without a copy. */
 export async function importAdapterFolder(): Promise<{ picked: boolean; imported: Array<{ id: string; name: string; copied: boolean; already?: boolean }> }> {
-  const response = await fetch('/v1/adapters/import-folder', { method: 'POST' });
+  // the desktop window shows the system dialog; a browser picks in the page and names the folder
+  let request: RequestInit = { method: 'POST' };
+  if (pickerInPage()) {
+    const path = await pickServerPath({ title: 'Folder with LoRA', kind: 'folder' });
+    if (!path) return { picked: false, imported: [] };
+    request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) };
+  }
+  const response = await fetch('/v1/adapters/import-folder', request);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `LoRA folder: HTTP ${response.status}`);
   return body;

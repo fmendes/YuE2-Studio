@@ -6,6 +6,8 @@ import { LegacyLibraryPreview } from './LegacyLibraryPreview';
 vi.mock('../context/I18nContext', () => ({
   useI18n: () => ({ t: (key: string) => key, songCount: (count: number) => String(count) }),
 }));
+// the desktop window's flow: the studio shows the system dialog (a browser gets ServerPathPicker)
+vi.mock('../services/externalLinks', () => ({ isDesktop: () => true }));
 
 it('keeps the current preview when a second folder selection is cancelled', async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;

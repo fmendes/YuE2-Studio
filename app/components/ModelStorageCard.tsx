@@ -3,6 +3,7 @@ import { FolderCog, Loader2, RotateCcw, X } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
 import type { TranslationKey } from '../i18n/translations';
 import { apiUrl } from '../services/apiBase';
+import { pickServerPath, pickerInPage } from './ServerPathPicker';
 
 interface FolderUse { name: string; bytes: number; elsewhere: boolean }
 interface Storage {
@@ -81,7 +82,14 @@ export const ModelStorageCard: React.FC = () => {
   const choose = () => guarded(async () => {
     setAsking(true);
     try {
-      const body = await answer(await fetch(apiUrl('/v1/storage/pick'), { method: 'POST' }));
+      // the desktop window shows the system dialog; a browser picks in the page and names the folder
+      let request: RequestInit = { method: 'POST' };
+      if (pickerInPage()) {
+        const path = await pickServerPath({ title: t('storageChange'), kind: 'folder' });
+        if (!path) return;
+        request = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) };
+      }
+      const body = await answer(await fetch(apiUrl('/v1/storage/pick'), request));
       if (body.picked === true) setPicked(body as unknown as Picked);
     } finally {
       setAsking(false);
